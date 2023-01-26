@@ -1,0 +1,20 @@
+#######
+Dt						1.0e-4
+OutputInterval			0.005     
+EndTime					0.6
+MinX									#対称境界と周期境界を指定できる
+MinY									#（仮想粒子を配置し影響半径内に仮想粒子がある場合には仮想粒子と接続する）
+MinZ									#
+MaxX									#なにも指定しなかった場合は仮想粒子が配置されない
+MaxY									#
+MaxZ									#
+ParticlePropertyCount	1				#これ以降に粒子種類別の属性を続けて定義する
+ParticlePropertyId		0								#力か変位によって境界条件を与える,粒子種類数を超えない番号を指定する
+	X													#単位体積あたりの力[N/m^3]を示したファイル名を与える
+	Y													#数字を与えると常にその力が働く
+	Z													
+	density				1000.0
+	young				1.0e5
+	poisson				0.3
+	artificial			2.0e5			#ヤング率と同程度の値を設定する
+	
