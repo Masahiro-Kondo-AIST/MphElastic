@@ -12,9 +12,11 @@
 //    Copyright (c) 2010   Masahiro Kondo                                                         //
 //================================================================================================//
 
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <vector>
 
 #include "vec3T.hpp"
