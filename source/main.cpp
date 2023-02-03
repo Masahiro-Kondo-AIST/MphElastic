@@ -1,6 +1,6 @@
 //================================================================================================//
 //------------------------------------------------------------------------------------------------//
-//    MPH-I : Moving Particle Hydrodynamics for Elastic body                                      //
+//    MPH-Elastic : Moving Particle Hydrodynamics for Elastic body                                      //
 //------------------------------------------------------------------------------------------------//
 //    Developed by    : Masahiro Kondo                                                            //
 //    Distributed in  : 2023                                                                      //
@@ -9,7 +9,8 @@
 //    For theory      : see the following references                                              //
 //     [1] JSCES Paper No.20070031,  https://doi.org/10.11421/jsces.2007.20070031                 //
 //     [2] Int.J.Numer.Meth.Engng.81 (2010) 1514-1528,  https://doi.org/10.1002/nme.2744          //
-//    Copyright (c) 2010   Masahiro Kondo                                                         //
+//    Copyright (c) 2010  Masahiro Kondo                                                          //
+//    Copyright (c) 2023  National Institute of Advanced Industrial Science and Technology (AIST) //
 //================================================================================================//
 
 
@@ -38,6 +39,7 @@ using namespace std;
 #define DEFAULT_DATA "sample.data"
 #define DEFAULT_GRID "sample.grid"
 #define DEFAULT_PROF "sample%03d.prof"
+#define DEFAULT_VTK  "sample%03d.vtk"
 #define DEFAULT_ENE  "sample.ene"
 
 // Simulation Time
@@ -46,8 +48,10 @@ static double Time;
 static double Dt;
 
 // Prof Output
-static double OutputInterval=0;
+static double OutputInterval=0.0;
 static double OutputNext=0.0;
+static double VtkOutputInterval=0.0;
+static double VtkOutputNext=0.0;
 
 // Simulation Domain
 typedef struct{
@@ -58,14 +62,7 @@ static domain_t DomainMin[DIM] = {{0.0,NORMAL},{0.0,NORMAL},{0.0,NORMAL}};
 static domain_t DomainMax[DIM] = {{0.0,NORMAL},{0.0,NORMAL},{0.0,NORMAL}};
 
 
-typedef struct {
-    int prop[DIM];             // FORCE_VOLUME or DISPLACEMENT
-    vector<double> val[DIM];   // force per volume [N/m^3] or displacement [m]
-    char filename[DIM][256];
-}external_t;
-
 typedef struct{
-    external_t external;
     double density;
     double young;
     double poisson;
@@ -77,9 +74,6 @@ typedef struct{
 static int ParticlePropertyCount;
 static vector<property_t> ParticleProperty;
 
-
-// Artificial Force
-// static double Sum_rijrijwij; // 1.0/trace(Normalizer)でよい気がする。。。影響半径が大きい場合にも同じ力を加えるとトルクが大きくなってしまうから1.0/trac{Normalizer}のほうがよいかも
 
 
 // Particle
@@ -128,6 +122,7 @@ static vector<int> CellParticle;
 static void readDataFile(char *filename);
 static void readGridFile(char *filename);
 static void writeProfFile(char *filename);
+static void writeVtkFile(char *filename);
 static void writeEnergyFile(char *filename);
 
 static void initializeExternalForce();
@@ -139,284 +134,248 @@ static void calculateNormalizer();
 static void resetAcceleration();
 static void calculateStressForce();
 static void calculateArtificialForce();
-static void calculateExternalForce();
 static void calculateConvection();
 static double weight(const vec3<double> r, const double radius);
 
 
+	clock_t cFrom, cTill, cStart, cEnd;
+	clock_t cInitialize=0, cReset=0, cStress=0, cArtificial=0, cOutput=0, cEnergyOutput=0, cConvection=0;
 
- int main(int argc, char* argv[])
+
+int main(int argc, char* argv[])
 {
-    char logfilename[1024]  = DEFAULT_LOG;
-    char datafilename[1024] = DEFAULT_DATA;
-    char gridfilename[1024] = DEFAULT_GRID;
-    char proffilename[1024] = DEFAULT_PROF;
-    char energyfilename[1024]=DEFAULT_ENE;
-    {
-        if(argc>1)strcpy(datafilename,argv[1]);
-        if(argc>2)strcpy(gridfilename,argv[2]);
-        if(argc>3)strcpy(proffilename,argv[3]);
-        if(argc>4)strcpy(energyfilename,argv[4]);
-        if(argc>5)strcpy( logfilename,argv[5]);
-    }
-    log_open(logfilename);
-    {
-        time_t t=time(NULL);
-        log_printf("start reading files at %s\n",ctime(&t));
-    }
-    readDataFile(datafilename);
-    readGridFile(gridfilename);
-    
-    {
-    	
-    {
-        time_t t=time(NULL);
-        log_printf("start initialization at %s\n",ctime(&t));
-    }
-        initializeExternalForce();
-        initializeDomain();
-        generateBoundary();
-        calculateNeighbor( InitialNeighbor, InitialPosition );
-        calculateMuLambda();
-        calculateNormalizer();
-     
-    {
-        time_t t=time(NULL);
-        log_printf("start main roop at %s\n",ctime(&t));
-    }
-    	int iStep=(int)(Time/Dt);
-        while (Time < EndTime + 1.0e-5*Dt){
-            resetAcceleration();
-            calculateStressForce();
-            calculateArtificialForce();
-            calculateExternalForce();
-            if( Time + 1.0e-5*Dt >= OutputNext ){
-                char filename[256];
-                sprintf(filename,proffilename,iStep);
-                writeProfFile(filename);
-                log_printf("@ Prof Output Time:%lf\n",Time);
-                OutputNext += OutputInterval;
-            }
-            writeEnergyFile(energyfilename);    // 
-            calculateConvection();// 速度と位置の更新
+	char logfilename[1024]  = DEFAULT_LOG;
+	char datafilename[1024] = DEFAULT_DATA;
+	char gridfilename[1024] = DEFAULT_GRID;
+	char proffilename[1024] = DEFAULT_PROF;
+	char vtkfilename[1024]  = DEFAULT_VTK;
+	char energyfilename[1024]=DEFAULT_ENE;
+	{
+		if(argc>1)strcpy(datafilename,argv[1]);
+		if(argc>2)strcpy(gridfilename,argv[2]);
+		if(argc>3)strcpy(proffilename,argv[3]);
+		if(argc>4)strcpy( vtkfilename,argv[4]);
+		if(argc>5)strcpy(energyfilename,argv[5]);
+		if(argc>6)strcpy( logfilename,argv[6]);
+	}
+	log_open(logfilename);
+	{
+		time_t t=time(NULL);
+		log_printf("start reading files at %s\n",ctime(&t));
+	}
+	readDataFile(datafilename);
+	readGridFile(gridfilename);
+	
+	
+	
+	{
+		time_t t=time(NULL);
+		log_printf("start initialization at %s\n",ctime(&t));
+	}
+	initializeDomain();
+	generateBoundary();
+	calculateNeighbor( InitialNeighbor, InitialPosition );
+	calculateMuLambda();
+	calculateNormalizer();
 
-            Time += Dt;
-            iStep++;
-        }
-    }
+	
+	{
+		time_t t=time(NULL);
+		log_printf("start main roop at %s\n",ctime(&t));
+	}
+	int iStep=(int)(Time/Dt);
+	OutputNext = Time;
+	VtkOutputNext = Time;
+	cStart = clock();
+	cFrom = cStart;
+	
+	cTill = clock(); cInitialize += (cTill-cFrom); cFrom = cTill;
+	while (Time < EndTime + 1.0e-5*Dt){
+		resetAcceleration();
+		cTill = clock(); cReset += (cTill-cFrom); cFrom = cTill;
+		calculateStressForce();
+		cTill = clock(); cStress += (cTill-cFrom); cFrom = cTill;
+		calculateArtificialForce();
+		cTill = clock(); cArtificial += (cTill-cFrom); cFrom = cTill;
+		if( Time + 1.0e-5*Dt >= OutputNext ){
+			char filename[256];
+			sprintf(filename,proffilename,iStep);
+			writeProfFile(filename);
+			log_printf("@ Prof Output Time:%lf\n",Time);
+			OutputNext += OutputInterval;
+		}
+		if( Time + 1.0e-5*Dt >= VtkOutputNext ){
+			char filename[256];
+			sprintf(filename,vtkfilename,iStep);
+			writeVtkFile(filename);
+			log_printf("@ Vtk Output Time:%lf\n",Time);
+			VtkOutputNext += VtkOutputInterval;
+		}
+		cTill = clock(); cOutput += (cTill-cFrom); cFrom = cTill;
+		writeEnergyFile(energyfilename);
+		cTill = clock(); cEnergyOutput += (cTill-cFrom); cFrom = cTill;
+// 
+		calculateConvection();
+		cTill = clock(); cConvection += (cTill-cFrom); cFrom = cTill;
+		
+		Time += Dt;
+		iStep++;
+	}
+	
+	{
+		time_t t=time(NULL);
+		log_printf("end main roop at %s\n",ctime(&t));
+	}
+	
+	cEnd = cTill;
     {
         time_t t=time(NULL);
-        log_printf("end main roop at %s\n",ctime(&t));
+    	log_printf("initialize:              %lf [CPU sec]\n", (double)cInitialize/CLOCKS_PER_SEC);
+    	log_printf("reset acceleration:      %lf [CPU sec]\n", (double)cReset/CLOCKS_PER_SEC);
+    	log_printf("stress force:            %lf [CPU sec]\n", (double)cStress/CLOCKS_PER_SEC);
+    	log_printf("artificial force:        %lf [CPU sec]\n", (double)cArtificial/CLOCKS_PER_SEC);
+    	log_printf("output:                  %lf [CPU sec]\n", (double)cOutput/CLOCKS_PER_SEC);
+    	log_printf("energy output:           %lf [CPU sec]\n", (double)cEnergyOutput/CLOCKS_PER_SEC);
+    	log_printf("convection:              %lf [CPU sec]\n", (double)cConvection/CLOCKS_PER_SEC);
+    	log_printf("total:                   %lf [CPU sec]\n", (double)(cInitialize+cReset+cStress+cArtificial+cOutput+cEnergyOutput+cConvection)/CLOCKS_PER_SEC);
+    	log_printf("total (check):           %lf [CPU sec]\n", (double)(cEnd-cStart)/CLOCKS_PER_SEC);
     }
-    return 0;
-    
+	return 0;
+	
 }
 
 static void readDataFile(char *filename)
 {
-    FILE * fp;
-    char buf[1024];
-    char command[1024];
-    char sval[1024];
-    // int ival;
-    double dval;
-    const int reading_global=0;
-    const int reading_particle_property=1;
-    int mode=reading_global;
-    int iProperty;
-    
-
-    fp=fopen(filename,"r");
-    mode=reading_global;
-    while(fp!=NULL && !feof(fp) && !ferror(fp)){
-        fgets(buf,sizeof(buf),fp);
-        if(buf[0]=='#'){}
-        else if(sscanf(buf," Dt %lf",&Dt)==1){mode=reading_global;}
-        else if(sscanf(buf," OutputInterval %lf",&OutputInterval)==1){mode=reading_global;}
-        else if(sscanf(buf," EndTime %lf",&EndTime)==1){mode=reading_global;}
-        else if(sscanf(buf," MinX %s",command)==1){
-            if(command[0]=='#'){}
-            else if(strcmp(command,"symmetric")==0){
-                DomainMin[0].prop=SYMMETRIC;
-            }
-            else if(strcmp(command,"periodic")==0){
-                DomainMin[0].prop=PERIODIC;
-            }
-            mode=reading_global;
-        }
-        else if(sscanf(buf," MinY %s",command)==1){
-            if(command[0]=='#'){}
-            else if(strcmp(command,"symmetric")==0){
-                DomainMin[1].prop=SYMMETRIC;
-            }
-            else if(strcmp(command,"periodic")==0){
-                DomainMin[1].prop=PERIODIC;
-            }
-            mode=reading_global;
-        }
-        else if(sscanf(buf," MinZ %s",command)==1){
-            if(command[0]=='#'){}
-            else if(strcmp(command,"symmetric")==0){
-                DomainMin[2].prop=SYMMETRIC;
-            }
-            else if(strcmp(command,"periodic")==0){
-                DomainMin[2].prop=PERIODIC;
-            }
-            mode=reading_global;
-        }
-        else if(sscanf(buf," MaxX %s",command)==1){
-            if(command[0]=='#'){}
-            else if(strcmp(command,"symmetric")==0){
-                DomainMax[0].prop=SYMMETRIC;
-            }
-            else if(strcmp(command,"periodic")==0){
-                DomainMax[0].prop=PERIODIC;
-            }
-            mode=reading_global;
-        }
-        else if(sscanf(buf," MaxY %s",command)==1){
-            if(command[0]=='#'){}
-            else if(strcmp(command,"symmetric")==0){
-                DomainMax[1].prop=SYMMETRIC;
-            }
-            else if(strcmp(command,"periodic")==0){
-                DomainMax[1].prop=PERIODIC;
-            }
-            mode=reading_global;
-        }
-        else if(sscanf(buf," MaxZ %s",command)==1){
-            if(command[0]=='#'){}
-            else if(strcmp(command,"symmetric")==0){
-                DomainMax[2].prop=SYMMETRIC;
-            }
-            else if(strcmp(command,"periodic")==0){
-                DomainMax[2].prop=PERIODIC;
-            }
-            mode=reading_global;
-        }
-        else if(sscanf(buf," ParticlePropertyCount %d", &ParticlePropertyCount)==1){
-            ParticleProperty.resize(ParticlePropertyCount);
-            for(int iProp=0;iProp<ParticlePropertyCount;++iProp){
-                // property_t &property = ParticleProperty[iProp];
-                // external_t &external = property.external;
-                ParticleProperty[iProp].external.prop[0]=FORCE_VOLUME;
-                ParticleProperty[iProp].external.prop[1]=FORCE_VOLUME;
-                ParticleProperty[iProp].external.prop[2]=FORCE_VOLUME;
-                sprintf(ParticleProperty[iProp].external.filename[0],"0.0");
-                sprintf(ParticleProperty[iProp].external.filename[1],"0.0");
-                sprintf(ParticleProperty[iProp].external.filename[2],"0.0");
-                ParticleProperty[iProp].density=0.0;
-                ParticleProperty[iProp].young=0.0;
-                ParticleProperty[iProp].poisson=0.0;
-                ParticleProperty[iProp].mu=0.0;
-                ParticleProperty[iProp].lambda=0.0;
-                ParticleProperty[iProp].artificial=0.0;
-            }
-            mode=reading_particle_property;
-        }
-        else if(sscanf(buf," ParticlePropertyId %d", &iProperty)==1 && mode==reading_particle_property){
-            if(iProperty<0 || ParticlePropertyCount<=iProperty){
-                iProperty=-1;
-            }
-        }
-        else if(sscanf(buf," X force %s", sval)==1 && mode==reading_particle_property){
-            if(0<=iProperty && iProperty<ParticlePropertyCount ){
-                ParticleProperty[iProperty].external.prop[0]=FORCE_VOLUME;
-                strcpy(ParticleProperty[iProperty].external.filename[0],sval);
-            }
-        }
-        else if(sscanf(buf," Y force %s", sval)==1 && mode==reading_particle_property){
-            if(0<=iProperty && iProperty<ParticlePropertyCount ){
-                ParticleProperty[iProperty].external.prop[1]=FORCE_VOLUME;
-                strcpy(ParticleProperty[iProperty].external.filename[1],sval);
-            }
-        }
-        else if(sscanf(buf," Z force %s", sval)==1 && mode==reading_particle_property){
-            if(0<=iProperty && iProperty<ParticlePropertyCount ){
-                ParticleProperty[iProperty].external.prop[2]=FORCE_VOLUME;
-                strcpy(ParticleProperty[iProperty].external.filename[2],sval);
-            }
-        }
-        else if(sscanf(buf," X displacement %s", sval)==1 && mode==reading_particle_property){
-            if(0<=iProperty && iProperty<ParticlePropertyCount ){
-                ParticleProperty[iProperty].external.prop[0]=DISPLACEMENT;
-                strcpy(ParticleProperty[iProperty].external.filename[0],sval);
-            }
-        }
-        else if(sscanf(buf," Y displacement %s", sval)==1 && mode==reading_particle_property){
-            if(0<=iProperty && iProperty<ParticlePropertyCount ){
-                ParticleProperty[iProperty].external.prop[1]=DISPLACEMENT;
-                strcpy(ParticleProperty[iProperty].external.filename[1],sval);
-            }
-        }
-        else if(sscanf(buf," Z displacement %s", sval)==1 && mode==reading_particle_property){
-            if(0<=iProperty && iProperty<ParticlePropertyCount ){
-                ParticleProperty[iProperty].external.prop[2]=DISPLACEMENT;
-                strcpy(ParticleProperty[iProperty].external.filename[2],sval);
-            }
-        }
-        else if(sscanf(buf," density %lf", &dval)==1 && mode==reading_particle_property){
-            if(0<=iProperty && iProperty<ParticlePropertyCount ){
-                ParticleProperty[iProperty].density = dval;
-            }
-        }
-        else if(sscanf(buf," young %lf", &dval)==1 && mode==reading_particle_property){
-            if(0<=iProperty && iProperty<ParticlePropertyCount ){
-                ParticleProperty[iProperty].young = dval;
-            }
-        }
-        else if(sscanf(buf," poisson %lf", &dval)==1 && mode==reading_particle_property){
-            if(0<=iProperty && iProperty<ParticlePropertyCount ){
-                ParticleProperty[iProperty].poisson = dval;
-            }
-        }
-        else if(sscanf(buf," artificial %lf", &dval)==1 && mode==reading_particle_property){
-            if(0<=iProperty && iProperty<ParticlePropertyCount ){
-                ParticleProperty[iProperty].artificial = dval;
-            }
-        }
-        else if(sscanf(buf," Equilibrium %s",command)==1){
-            if(strcmp(command,"on")==0){
-                Equilibrium=1;
-            }
-            mode=reading_global;
-        }
-        else{
-            log_printf("Invalid line in data file \"%s\"\n", buf);
-        }
-    }
-    fclose(fp);
-    return;
-}
-
-static void initializeExternalForce( void ){
-    for(int iProp=0;iProp<ParticlePropertyCount;++iProp){
-        external_t &external = ParticleProperty[iProp].external;
-        for(int iDim=0;iDim<DIM;++iDim){
-            external.val[iDim].resize((int)(EndTime/Dt+1.0e-5)+1);
-            double dval=0.0;
-            if(sscanf(external.filename[iDim],"%lf",&dval)==1){
-                for(int iStep=0;iStep<(int)external.val[iDim].size();++iStep){
-                    external.val[iDim][iStep]=dval;
-                }
-            }
-            else{
-                char buf[1024];
-                double simtime=0.0;
-                FILE *fp=fopen(external.filename[iDim],"r");
-                for(int iStep=0;iStep<(int)external.val[iDim].size();++iStep){
-                    while(fp!=NULL && !feof(fp) && !ferror(fp)){
-                        if((int)(simtime/Dt+1.0e-5)>=iStep){break;}
-                        fgets(buf,sizeof(buf),fp);
-                        sscanf(buf," %lf %lf",&simtime, &dval);
-                    }
-                    external.val[iDim][iStep] = dval;
-                }
-                fclose(fp);
-            }
-        }
-    }
-        
+	FILE * fp;
+	char buf[1024];
+	char command[1024];
+	char sval[1024];
+	// int ival;
+	double dval;
+	const int reading_global=0;
+	const int reading_particle_property=1;
+	int mode=reading_global;
+	int iProperty;
+	
+	
+	fp=fopen(filename,"r");
+	mode=reading_global;
+	while(fp!=NULL && !feof(fp) && !ferror(fp)){
+		fgets(buf,sizeof(buf),fp);
+		if(buf[0]=='#'){}
+		else if(sscanf(buf," Dt %lf",&Dt)==1){mode=reading_global;}
+		else if(sscanf(buf," OutputInterval %lf",&OutputInterval)==1){mode=reading_global;}
+		else if(sscanf(buf," VtkOutputInterval %lf",&VtkOutputInterval)==1){mode=reading_global;}
+		else if(sscanf(buf," EndTime %lf",&EndTime)==1){mode=reading_global;}
+		else if(sscanf(buf," MinX %s",command)==1){
+			if(command[0]=='#'){}
+			else if(strcmp(command,"symmetric")==0){
+				DomainMin[0].prop=SYMMETRIC;
+			}
+			else if(strcmp(command,"periodic")==0){
+				DomainMin[0].prop=PERIODIC;
+			}
+			mode=reading_global;
+		}
+		else if(sscanf(buf," MinY %s",command)==1){
+			if(command[0]=='#'){}
+			else if(strcmp(command,"symmetric")==0){
+				DomainMin[1].prop=SYMMETRIC;
+			}
+			else if(strcmp(command,"periodic")==0){
+				DomainMin[1].prop=PERIODIC;
+			}
+			mode=reading_global;
+		}
+		else if(sscanf(buf," MinZ %s",command)==1){
+			if(command[0]=='#'){}
+			else if(strcmp(command,"symmetric")==0){
+				DomainMin[2].prop=SYMMETRIC;
+			}
+			else if(strcmp(command,"periodic")==0){
+				DomainMin[2].prop=PERIODIC;
+			}
+			mode=reading_global;
+		}
+		else if(sscanf(buf," MaxX %s",command)==1){
+			if(command[0]=='#'){}
+			else if(strcmp(command,"symmetric")==0){
+				DomainMax[0].prop=SYMMETRIC;
+			}
+			else if(strcmp(command,"periodic")==0){
+				DomainMax[0].prop=PERIODIC;
+			}
+			mode=reading_global;
+		}
+		else if(sscanf(buf," MaxY %s",command)==1){
+			if(command[0]=='#'){}
+			else if(strcmp(command,"symmetric")==0){
+				DomainMax[1].prop=SYMMETRIC;
+			}
+			else if(strcmp(command,"periodic")==0){
+				DomainMax[1].prop=PERIODIC;
+			}
+			mode=reading_global;
+		}
+		else if(sscanf(buf," MaxZ %s",command)==1){
+			if(command[0]=='#'){}
+			else if(strcmp(command,"symmetric")==0){
+				DomainMax[2].prop=SYMMETRIC;
+			}
+			else if(strcmp(command,"periodic")==0){
+				DomainMax[2].prop=PERIODIC;
+			}
+			mode=reading_global;
+		}
+		else if(sscanf(buf," ParticlePropertyCount %d", &ParticlePropertyCount)==1){
+			ParticleProperty.resize(ParticlePropertyCount);
+			for(int iProp=0;iProp<ParticlePropertyCount;++iProp){
+				ParticleProperty[iProp].density=0.0;
+				ParticleProperty[iProp].young=0.0;
+				ParticleProperty[iProp].poisson=0.0;
+				ParticleProperty[iProp].mu=0.0;
+				ParticleProperty[iProp].lambda=0.0;
+				ParticleProperty[iProp].artificial=0.0;
+			}
+			mode=reading_particle_property;
+		}
+		else if(sscanf(buf," ParticlePropertyId %d", &iProperty)==1 && mode==reading_particle_property){
+			if(iProperty<0 || ParticlePropertyCount<=iProperty){
+				iProperty=-1;
+			}
+		}
+		else if(sscanf(buf," density %lf", &dval)==1 && mode==reading_particle_property){
+			if(0<=iProperty && iProperty<ParticlePropertyCount ){
+				ParticleProperty[iProperty].density = dval;
+			}
+		}
+		else if(sscanf(buf," young %lf", &dval)==1 && mode==reading_particle_property){
+			if(0<=iProperty && iProperty<ParticlePropertyCount ){
+				ParticleProperty[iProperty].young = dval;
+			}
+		}
+		else if(sscanf(buf," poisson %lf", &dval)==1 && mode==reading_particle_property){
+			if(0<=iProperty && iProperty<ParticlePropertyCount ){
+				ParticleProperty[iProperty].poisson = dval;
+			}
+		}
+		else if(sscanf(buf," artificial %lf", &dval)==1 && mode==reading_particle_property){
+			if(0<=iProperty && iProperty<ParticlePropertyCount ){
+				ParticleProperty[iProperty].artificial = dval;
+			}
+		}
+		else if(sscanf(buf," Equilibrium %s",command)==1){
+			if(strcmp(command,"on")==0){
+				Equilibrium=1;
+			}
+			mode=reading_global;
+		}
+		else{
+			log_printf("Invalid line in data file \"%s\"\n", buf);
+		}
+	}
+	fclose(fp);
+	return;
 }
 
 
@@ -471,43 +430,111 @@ static void readGridFile(char *filename)
 
 static void writeProfFile(char *filename)
 {
-    double pressure=0.0;
-    mat3<double> deviatoric;
-    double vonMises;
-    FILE *fp;
-    fp=fopen(filename,"w");
-    
-    fprintf(fp,"%e\n",Time);
-    fprintf(fp,"%d\n",ParticleCount);
-    
-    for(int iP=0;iP<ParticleCount;++iP){
-        pressure = -(Stress[iP][0][0]+Stress[iP][1][1]+Stress[iP][2][2])/DIM;
-        deviatoric=Stress[iP];
-        deviatoric[0][0]+=pressure;
-        deviatoric[1][1]+=pressure;
-        deviatoric[2][2]+=pressure;
-        vonMises = 1.5*(deviatoric[0][0]*deviatoric[0][0]
-                        +deviatoric[0][1]*deviatoric[0][1]
-                        +deviatoric[0][2]*deviatoric[0][2]
-                        +deviatoric[1][0]*deviatoric[1][0]
-                        +deviatoric[1][1]*deviatoric[1][1]
-                        +deviatoric[1][2]*deviatoric[1][2]
-                        +deviatoric[2][0]*deviatoric[2][0]
-                        +deviatoric[2][1]*deviatoric[2][1]
-                        +deviatoric[2][2]*deviatoric[2][2]);
-        vonMises = sqrt(vonMises);
-        
-        fprintf(fp,"%d  %e %e %e  %e %e %e  %e %e %e  %e %e  %e %e\n",
-                Property[iP],
-                Position[iP][0],Position[iP][1],Position[iP][2],
-                Velocity[iP][0],Velocity[iP][1],Velocity[iP][2],
-                InitialPosition[iP][0],InitialPosition[iP][1],InitialPosition[iP][2],
-                Volume[iP], Radius[iP],
-                pressure,
-                vonMises);
-    }
-    fclose(fp);
+	double pressure=0.0;
+	mat3<double> deviatoric;
+	double vonMises;
+	FILE *fp;
+	fp=fopen(filename,"w");
+	
+	fprintf(fp,"%e\n",Time);
+	fprintf(fp,"%d %e  %e %e %e %e %e %e\n",
+		ParticleCount, 
+		AverageParticleSpacing, 
+		DomainMin[0].pos, DomainMax[0].pos,
+		DomainMin[1].pos, DomainMax[1].pos,
+		DomainMin[2].pos, DomainMax[2].pos
+	);
+	
+	for(int iP=0;iP<ParticleCount;++iP){
+		fprintf(fp,"%d  %e %e %e  %e %e %e  %e %e %e  %e %e  %e %e\n",
+			Property[iP],
+			Position[iP][0],Position[iP][1],Position[iP][2],
+			Velocity[iP][0],Velocity[iP][1],Velocity[iP][2],
+			InitialPosition[iP][0],InitialPosition[iP][1],InitialPosition[iP][2],
+			Volume[iP], Radius[iP]);
+	}
+	fclose(fp);
 }
+
+
+static void writeVtkFile(char *filename)
+{
+		
+	FILE *fp=fopen(filename, "w");
+	
+	fprintf(fp, "# vtk DataFile Version 2.0\n");
+	fprintf(fp, "Unstructured Grid Example\n");
+	fprintf(fp, "ASCII\n");
+	
+	fprintf(fp, "DATASET UNSTRUCTURED_GRID\n");
+	fprintf(fp, "POINTS %d float\n", ParticleCount);
+	for(int iP=0;iP<ParticleCount;++iP){
+		fprintf(fp, "%e %e %e\n", (float)Position[iP][0], (float)Position[iP][1], (float)Position[iP][2]);
+	}
+	fprintf(fp, "CELLS %d %d\n", ParticleCount, 2*ParticleCount);
+	for(int iP=0;iP<ParticleCount;++iP){
+		fprintf(fp, "1 %d ",iP);
+	}
+	fprintf(fp, "\n");
+	fprintf(fp, "CELL_TYPES %d\n", ParticleCount);
+	for(int iP=0;iP<ParticleCount;++iP){
+		fprintf(fp, "1 ");
+	}
+	fprintf(fp, "\n");
+	
+	fprintf(fp, "\n");
+	
+	fprintf(fp, "POINT_DATA %d\n", ParticleCount);
+	fprintf(fp, "SCALARS label float 1\n");
+	fprintf(fp, "LOOKUP_TABLE default\n");
+	for(int iP=0;iP<ParticleCount;++iP){
+		fprintf(fp, "%d\n", Property[iP]);
+	}
+	fprintf(fp, "\n");
+	fprintf(fp, "SCALARS Volume float 1\n");
+	fprintf(fp, "LOOKUP_TABLE default\n");
+	for(int iP=0;iP<ParticleCount;++iP){
+		fprintf(fp, "%e\n",(float)Volume[iP]);
+	}
+	fprintf(fp, "\n");
+	fprintf(fp, "SCALARS Radius float 1\n");
+	fprintf(fp, "LOOKUP_TABLE default\n");
+	for(int iP=0;iP<ParticleCount;++iP){
+		fprintf(fp, "%e\n", (float)Radius[iP]);
+	}
+	fprintf(fp, "\n");
+	fprintf(fp, "SCALARS Pressure float 1\n");
+	fprintf(fp, "LOOKUP_TABLE default\n");
+	for(int iP=0;iP<ParticleCount;++iP){
+		const double pressure = -(Stress[iP][0][0]+Stress[iP][1][1]+Stress[iP][2][2])/DIM;
+		fprintf(fp, "%e\n", (float)pressure);
+	}
+	fprintf(fp, "\n");
+	for(int iD=0;iD<DIM;++iD){
+		for(int jD=0;jD<DIM;++jD){
+			fprintf(fp, "\n");    fprintf(fp, "SCALARS stress[%d][%d] float 1\n",iD,jD);
+			fprintf(fp, "LOOKUP_TABLE default\n");
+			for(int iP=0;iP<ParticleCount;++iP){
+				fprintf(fp, "%e\n", (float)Stress[iP][iD][jD]);
+			}
+		}
+	}
+	fprintf(fp, "VECTORS velocity float\n");
+	for(int iP=0;iP<ParticleCount;++iP){
+		fprintf(fp, "%e %e %e\n", (float)Velocity[iP][0], (float)Velocity[iP][1], (float)Velocity[iP][2]);
+	}
+	fprintf(fp, "\n");
+	fprintf(fp, "VECTORS displacement float\n");
+	for(int iP=0;iP<ParticleCount;++iP){
+		const double displacement[DIM]={Position[iP][0]-InitialPosition[iP][0],Position[iP][1]-InitialPosition[iP][1],Position[iP][2]-InitialPosition[iP][2]};
+		fprintf(fp, "%e %e %e\n", (float)displacement[0], (float)displacement[1], (float)displacement[2]);
+	}
+	fprintf(fp, "\n");
+	
+	fflush(fp);
+	fclose(fp);
+}
+
 
 static void writeEnergyFile(char *filename)
 {
@@ -642,8 +669,7 @@ void generateBoundary( void ){
 
 static void calculateNeighbor( vector< vector<int> > &neighbor, const vector< vec3<double> > &position )
 {
-    // int (*cellpartilclecount)[CellCount[1]][CellCount[2]] = ( (*)[CellCount[1]][CellCount[2]] )CellParticleCount; // 動的型変換 一度コンパイル通ったらやってみてもよいかも？
-
+ 
     int range = (int)(MaxRadius/CellWidth) + 1;
     
     // store to cells
@@ -830,28 +856,6 @@ static void calculateArtificialForce()
     }
 }
 
-static void calculateExternalForce(){
-    
-    for(int iP=0;iP<ParticleCount;++iP){
-        ExternalForce[iP] = vec3<double>(0.0,0.0,0.0);
-        const property_t propI= ParticleProperty[Property[iP]];
-        const external_t external = propI.external;
-        for(int iDim=0;iDim<DIM;++iDim){
-            if(0){}
-            else if(external.prop[iDim]==FORCE_VOLUME){
-                const int iStep = (int)(Time/Dt+0.5);
-                ExternalForce[iP][iDim] = external.val[iDim][iStep] * Volume[iP];
-                
-            }
-            else if(external.prop[iDim]==DISPLACEMENT){
-                const int iStep = (int)(Time/Dt+0.5)+1;
-                ExternalForce[iP][iDim]
-                    = propI.density*Volume[iP]*(((external.val[iDim][iStep]-Position[iP][iDim]+InitialPosition[iP][iDim])/Dt - Velocity[iP][iDim])/Dt - Acceleration[iP][iDim]);
-            }
-        }
-        Acceleration[iP] += 1.0/propI.density * ExternalForce[iP] / Volume[iP];
-    }
-}
 
 static void calculateConvection()
 {
@@ -884,7 +888,6 @@ static void calculateConvection()
         Position[iP] += Velocity[iP]*Dt;
         ExternalWork += ExternalForce[iP]*Velocity[iP]*Dt;
     }
-    // log_printf("%e %e\n", Velocity[0][2], ExternalForce[0][2]);
 }
 
 
